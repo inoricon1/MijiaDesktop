@@ -1,0 +1,5 @@
+mijiaAPI==5.0.0
+pywebview>=6.0
+qrcode
+pillow
+requests
