@@ -6,6 +6,7 @@
 import base64
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -84,21 +85,41 @@ class Qingping:
         self._list = (time.time(), out)
         return out
 
-    def history(self, mac: str, start: int, end: int, max_pages: int = 80) -> list:
-        """历史数据，按时间升序返回 [{field: value, ..., "timestamp": t}]。"""
-        rows, offset = [], 0
-        for _ in range(max_pages):
+    def history(self, mac: str, start: int, end: int, max_pages: int = 400) -> list:
+        """历史数据，按时间升序返回 [{field: value, ..., "timestamp": t}]。
+
+        接口每页最多 200 条；先取第一页拿到总数，剩下的页并发取（一年的数据从约 100 秒降到几秒）。"""
+        def page(offset):
             j = self._get("/devices/data", mac=mac, start_time=start, end_time=end, offset=offset, limit=200)
-            data = j.get("data", [])
+            return j.get("total", 0), j.get("data", [])
+
+        total, first = page(0)
+        pages = [first]
+        offsets = list(range(200, min(total, max_pages * 200), 200))
+        if offsets:
+            with ThreadPoolExecutor(8) as ex:
+                pages.extend(ex.map(page_retry(page), offsets))
+        rows = []
+        for data in pages:
             for d in data:
                 row = {k: v.get("value") for k, v in d.items() if isinstance(v, dict)}
                 if row.get("timestamp"):
                     rows.append(row)
-            offset += len(data)
-            if not data or offset >= j.get("total", 0):
-                break
         rows.sort(key=lambda r: r["timestamp"])
         return rows
+
+
+def page_retry(fn, tries=3):
+    """并发请求偶尔会被限流，失败的页重试几次。"""
+    def run(offset):
+        for i in range(tries):
+            try:
+                return fn(offset)[1]
+            except Exception:
+                if i == tries - 1:
+                    raise
+                time.sleep(0.5 * (i + 1))
+    return run
 
 
 def spec_for(dev: dict) -> dict:

@@ -58,6 +58,34 @@ class History:
                                   (did, k, since))
             return cur.fetchall()
 
+    # 青萍历史：云端每页只有 200 条，下载过的存在本地（不随 14 天清理），之后只补新数据
+    def qp_init(self):
+        with self.lock:
+            self.db.execute("CREATE TABLE IF NOT EXISTS qph (did TEXT, ts INTEGER, data TEXT, PRIMARY KEY (did, ts))")
+            self.db.execute("CREATE TABLE IF NOT EXISTS qpm (did TEXT PRIMARY KEY, from_ts INTEGER)")
+            self.db.commit()
+
+    def qp_add(self, did, rows, from_ts=None):
+        with self.lock:
+            self.db.executemany("INSERT OR IGNORE INTO qph VALUES (?,?,?)",
+                                [(did, int(r["timestamp"]), json.dumps(r)) for r in rows])
+            if from_ts is not None:
+                self.db.execute("INSERT INTO qpm VALUES (?, ?) ON CONFLICT(did) DO UPDATE SET from_ts=MIN(from_ts, excluded.from_ts)",
+                                (did, from_ts))
+            self.db.commit()
+
+    def qp_range(self, did):
+        """(已下载覆盖的起始时间, 最新一条的时间)"""
+        with self.lock:
+            f = self.db.execute("SELECT from_ts FROM qpm WHERE did=?", (did,)).fetchone()
+            last = self.db.execute("SELECT MAX(ts) FROM qph WHERE did=?", (did,)).fetchone()
+        return (f[0] if f else None), (last[0] if last else None)
+
+    def qp_get(self, did, since):
+        with self.lock:
+            cur = self.db.execute("SELECT data FROM qph WHERE did=? AND ts>=? ORDER BY ts", (did, since))
+            return [json.loads(r[0]) for r in cur.fetchall()]
+
     def last_ts(self, did, k):
         with self.lock:
             r = self.db.execute("SELECT MAX(ts) FROM s WHERE did=? AND k=?", (did, k)).fetchone()
@@ -85,6 +113,8 @@ class Mijia:
         self.api = _make_api()
         self.specs = SpecStore(DATA_DIR / "specs")
         self.history = History(DATA_DIR / "history.db")
+        self.history.qp_init()
+        self._qp_locks = {}   # did -> Lock，避免同一设备并发重复下载
         self.lock = threading.RLock()
         self.devices = {}     # did -> device dict (含 summary)
         self._urn = {}        # did -> spec_type
@@ -202,6 +232,8 @@ class Mijia:
             }
         qp_info = self._load_qingping(out, devices, home_out)
         self.devices = out
+        if any(d.startswith("qp:") for d in out):
+            threading.Thread(target=self._qp_backfill, daemon=True).start()
         self._urn = {d["did"]: d.get("spec_type") for d in devices}
         return {
             "homes": home_out,
@@ -220,13 +252,28 @@ class Mijia:
         except Exception as e:
             return {"enabled": True, "error": str(e)}
         mi_macs = {norm_mac(d.get("mac")): d.get("name") for d in mi_devices if d.get("mac")}
+        # 青萍报的是蓝牙 MAC，米家报的是 Wi‑Fi MAC，同一台设备两边对不上；
+        # 所以对青萍生产的米家设备（cgllc.* / cleargrass.*）再按固件版本或名称匹配
+        mi_qp = [d for d in mi_devices if d.get("model", "").startswith(("cgllc.", "cleargrass."))]
+
+        def mi_twin(info):
+            mac = norm_mac(info.get("mac"))
+            if mac in mi_macs:
+                return mi_macs[mac]
+            for d in mi_qp:
+                fw = (d.get("extra") or {}).get("fw_version")
+                if (fw and fw == info.get("version")) or d.get("name") == info.get("name"):
+                    return d.get("name")
+            return None
+
         default_home = self.settings.get("home_id") or (homes[0]["id"] if homes else "")
         skipped = []
         for q in qdevs:
             info = q.get("info", {})
             mac = norm_mac(info.get("mac"))
-            if mac in mi_macs:  # 同一台设备同时在米家和青萍物联里，只保留米家那份
-                skipped.append({"name": info.get("name"), "mi_name": mi_macs[mac]})
+            twin = mi_twin(info)
+            if twin:  # 同一台设备同时在米家和青萍物联里，只保留米家那份
+                skipped.append({"name": info.get("name"), "mi_name": twin})
                 continue
             did = "qp:" + mac
             spec = spec_for(q)
@@ -346,19 +393,46 @@ class Mijia:
             end = min(int(it["time"]) for it in r) - 1
         return rows
 
+    def _qp_sync(self, did, since):
+        """确保本地有 since 至今的青萍历史：往前补缺的、往后补新的。"""
+        if not self.qp:
+            return
+        lock = self._qp_locks.setdefault(did, threading.Lock())
+        # 后台正在下载时不等它，直接用本地已有的数据（避免首次启动时界面卡住）
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            now = int(time.time())
+            from_ts, last = self.history.qp_range(did)
+            try:
+                if from_ts is None or since < from_ts:
+                    end = from_ts if from_ts is not None else now
+                    self.history.qp_add(did, self.qp.history(did[3:], since, end), from_ts=since)
+                    from_ts, last = self.history.qp_range(did)
+                interval = (self.devices.get(did) or {}).get("report_interval") or 600
+                if last is not None and now - last > min(interval, 600):
+                    self.history.qp_add(did, self.qp.history(did[3:], last + 1, now))
+            except Exception:
+                pass  # 网络问题时用本地已有的数据
+        finally:
+            lock.release()
+
     def _qp_cloud(self, did, p, hours):
         ck = (did, "*", hours)  # 青萍一次返回所有字段，按设备缓存
         hit = self._hcache.get(ck)
-        if not hit or time.time() - hit[0] >= (600 if hours <= 24 else 1800):
-            now = int(time.time())
-            try:
-                rows = self.qp.history(did[3:], now - int(hours * 3600), now) if self.qp else []
-            except Exception:
-                rows = hit[1] if hit else []
-            hit = (time.time(), rows)
+        if not hit or time.time() - hit[0] >= 120:
+            since = int(time.time()) - int(hours * 3600)
+            self._qp_sync(did, since)
+            hit = (time.time(), self.history.qp_get(did, since))
             self._hcache[ck] = hit
         field = BY_PIID[p["piid"]][0]
         return [(int(r["timestamp"]), float(r[field])) for r in hit[1] if r.get(field) is not None]
+
+    def _qp_backfill(self):
+        """后台把青萍设备一年内的历史一次性下载到本地，之后看长时间曲线就是秒开。"""
+        for did in [d for d in self.devices if d.startswith("qp:")]:
+            self._qp_sync(did, int(time.time()) - 2 * 86400)    # 先补最近两天，环境总览马上能用
+            self._qp_sync(did, int(time.time()) - 366 * 86400)  # 再补一年
 
     def _cloud(self, did, p, hours):
         if did.startswith("qp:"):
