@@ -247,10 +247,17 @@ class Mijia:
     def _load_qingping(self, out, mi_devices, homes) -> dict:
         if not self.qp:
             return {"enabled": False}
+        # 青萍偶尔会限流或连不上；成功时把设备列表存一份，失败时用上次的，设备不会凭空消失
+        cache = DATA_DIR / "qingping_devices.json"
+        stale = None
         try:
             qdevs = self.qp.devices(0)
+            cache.write_text(json.dumps(qdevs, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
-            return {"enabled": True, "error": str(e)}
+            if not cache.exists():
+                return {"enabled": True, "error": str(e)}
+            qdevs = json.loads(cache.read_text(encoding="utf-8"))
+            stale = f"{e}，暂时显示上次的数据"
         mi_macs = {norm_mac(d.get("mac")): d.get("name") for d in mi_devices if d.get("mac")}
         # 青萍报的是蓝牙 MAC，米家报的是 Wi‑Fi MAC，同一台设备两边对不上；
         # 所以对青萍生产的米家设备（cgllc.* / cleargrass.*）再按固件版本或名称匹配
@@ -287,7 +294,7 @@ class Mijia:
                 "report_interval": (info.get("setting") or {}).get("report_interval"),
                 "summary": summarize(spec),
             }
-        return {"enabled": True, "count": len(qdevs) - len(skipped), "skipped": skipped}
+        return {"enabled": True, "count": len(qdevs) - len(skipped), "skipped": skipped, "warning": stale}
 
     def _qp_results(self) -> list:
         """青萍设备的最新读数，整理成和米家 get_devices_prop 一样的结构。"""
@@ -488,7 +495,8 @@ class Mijia:
         now = int(time.time())
         out = {}
         for d in list(self.devices.values()):
-            if not d["online"] or d["did"] in self.settings["hidden"]:
+            # 离线的传感器也取云端历史，界面上照样显示最后读数并标「离线」
+            if d["did"] in self.settings["hidden"]:
                 continue
             for p in d["summary"].get("env", []):
                 rows = self.series(d["did"], p, 24)

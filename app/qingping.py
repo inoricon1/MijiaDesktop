@@ -59,17 +59,29 @@ class Qingping:
             self._exp = time.time() + int(j.get("expires_in", 7200))
             return self._token
 
-    def _get(self, path: str, **params) -> dict:
-        # 每个请求都要带一个 20 秒内有效、不能重复的毫秒时间戳
-        params["timestamp"] = int(time.time() * 1000)
-        r = requests.get(API_BASE + path, params=params, timeout=20,
-                         headers={"Authorization": f"Bearer {self._auth()}"})
-        if r.status_code == 401:
-            self._token = None
-            raise QingpingError("青萍授权已失效")
-        if r.status_code != 200:
-            raise QingpingError(f"青萍接口错误 {r.status_code}: {r.text[:120]}")
-        return r.json()
+    def _get(self, path: str, tries: int = 4, **params) -> dict:
+        # 青萍服务器请求太密时会回 503 / 429，等一会儿重试
+        for i in range(tries):
+            # 每个请求都要带一个 20 秒内有效、不能重复的毫秒时间戳
+            params["timestamp"] = int(time.time() * 1000)
+            try:
+                r = requests.get(API_BASE + path, params=params, timeout=20,
+                                 headers={"Authorization": f"Bearer {self._auth()}"})
+            except requests.RequestException as e:
+                err = QingpingError(f"连不上青萍服务器：{e.__class__.__name__}")
+            else:
+                if r.status_code == 200:
+                    return r.json()
+                if r.status_code == 401:
+                    self._token = None
+                    err = QingpingError("青萍授权已失效")
+                elif r.status_code in (429, 500, 502, 503, 504):
+                    err = QingpingError(f"青萍服务器繁忙（{r.status_code}）")
+                else:
+                    raise QingpingError(f"青萍接口错误 {r.status_code}")
+            if i < tries - 1:
+                time.sleep(1.5 * (i + 1))
+        raise err
 
     def devices(self, max_age: float = 50) -> list:
         """设备列表（含最新读数），短时间内重复调用走缓存。"""
@@ -97,7 +109,7 @@ class Qingping:
         pages = [first]
         offsets = list(range(200, min(total, max_pages * 200), 200))
         if offsets:
-            with ThreadPoolExecutor(8) as ex:
+            with ThreadPoolExecutor(3) as ex:  # 并发太高会被青萍限流（503）
                 pages.extend(ex.map(page_retry(page), offsets))
         rows = []
         for data in pages:

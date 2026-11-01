@@ -203,6 +203,7 @@ async function reload() {
     const d = await call('load');
     Object.assign(S, { homes: d.homes, devices: d.devices, scenes: d.scenes, settings: d.settings, qingping: d.qingping || {} });
     if (S.qingping.error) toast('青萍物联：' + S.qingping.error, true);
+    else if (S.qingping.warning) toast('青萍物联：' + S.qingping.warning);
     applyTheme(S.settings.theme);
     $('#btn-top').classList.toggle('active', !!S.settings.on_top);
     if (!S.homes.find(x => x.id === S.home)) S.home = S.settings.home_id && S.homes.find(x => x.id === S.settings.home_id) ? S.settings.home_id : S.homes[0]?.id;
@@ -380,7 +381,8 @@ function envPanel(d, rid, extras, multi) {
   const wide = !!(coP && (coC || S.trends[d.did]?.[pk(coP)]));
   const panel = h('div', { class: 'envp' + (wide ? ' wide' : '') + (d.online ? '' : ' offline'), onclick: () => openDetail(d.did) });
   panel.append(h('div', { class: 'envp-head' },
-    h('div', { class: 'envp-title' }, rid ? roomName(rid) : d.name, multi || !rid ? h('span', {}, rid ? d.name : '') : null),
+    // 设备名和房间名不同就一直显示设备名，免得只剩一个面板时看不出是哪个传感器
+    h('div', { class: 'envp-title' }, rid ? roomName(rid) : d.name, rid && (multi || d.name !== roomName(rid)) ? h('span', {}, d.name) : null),
     cf ? h('span', { class: 'tag ' + cf[1] }, cf[0]) : null,
     !d.online ? h('span', { class: 'tag off' }, '离线') : stale ? h('span', { class: 'tag stale' }, stale + '更新') : null));
 
