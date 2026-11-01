@@ -1,11 +1,21 @@
 """米家桌面版入口：pywebview 窗口 + 暴露给前端的 JS API。"""
+import logging
 import sys
+import time
 import traceback
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import webview
 
-from core import Mijia
+from core import DATA_DIR, Mijia
+
+# 运行日志：程序目录下 data/app.log（最多 1MB × 2 份），排查「界面上没显示」这类问题用
+log = logging.getLogger("mijia")
+log.setLevel(logging.INFO)
+_h = RotatingFileHandler(DATA_DIR / "app.log", maxBytes=1_000_000, backupCount=1, encoding="utf-8")
+_h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+log.addHandler(_h)
 
 HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 
@@ -13,10 +23,14 @@ HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 def safe(fn):
     """前端调用统一返回 {ok, data|error}，异常不会把窗口搞崩。"""
     def wrapper(self, *a, **kw):
+        t = time.time()
         try:
-            return {"ok": True, "data": fn(self, *a, **kw)}
+            data = fn(self, *a, **kw)
+            if time.time() - t > 5:
+                log.info("%s 用时 %.1fs", fn.__name__, time.time() - t)
+            return {"ok": True, "data": data}
         except Exception as e:
-            traceback.print_exc()
+            log.error("%s 失败：%s\n%s", fn.__name__, e, traceback.format_exc())
             return {"ok": False, "error": str(e) or e.__class__.__name__}
     wrapper.__name__ = fn.__name__
     return wrapper
@@ -46,7 +60,14 @@ class Api:
 
     @safe
     def load(self):
-        return self._m.load()
+        d = self._m.load()
+        log.info("load：%d 个设备，青萍=%s", len(d["devices"]), d.get("qingping"))
+        return d
+
+    @safe
+    def log(self, msg):
+        """前端的报错和诊断信息也写进日志。"""
+        log.info("界面：%s", str(msg)[:2000])
 
     @safe
     def poll(self):
@@ -102,6 +123,7 @@ class Api:
 
 
 def main():
+    log.info("启动")
     api = Api()
     win = webview.create_window(
         "米家桌面版", str(HERE / "web" / "index.html"), js_api=api,
@@ -109,7 +131,8 @@ def main():
         background_color="#F4F5F7", on_top=bool(api._m.settings.get("on_top")),
     )
     api._win = win
-    webview.start(debug="--debug" in sys.argv, private_mode=False)
+    # 不用持久化的浏览器缓存：pywebview 固定用 127.0.0.1:42001 提供页面，持久缓存会让更新后的 app.js 不生效
+    webview.start(debug="--debug" in sys.argv, private_mode=True)
 
 
 if __name__ == "__main__":

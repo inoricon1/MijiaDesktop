@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -15,7 +16,13 @@ from mijiaAPI import mijiaAPI
 from qingping import BY_PIID, Qingping, QingpingError, norm_mac, spec_for
 from spec import TREND_KEYS, SpecStore, summarize
 
-DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "MijiaDesktop"
+# 数据放在程序目录旁边，不放 %APPDATA%：从打包应用（比如 Claude 桌面版）里启动的进程，
+# 写 AppData 会被 Windows 悄悄重定向到该应用的私有目录，导致双击快捷方式打开时读到的是另一份数据
+DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Programs" / "MijiaDesktop" / "data"
+OLD_DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "MijiaDesktop"
+if not (DATA_DIR / "auth.json").exists() and (OLD_DATA_DIR / "auth.json").exists():
+    shutil.copytree(OLD_DATA_DIR, DATA_DIR, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("app.log*"))  # 旧版本的数据搬过来
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 AUTH_FILE = DATA_DIR / "auth.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"

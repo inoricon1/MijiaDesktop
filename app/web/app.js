@@ -210,7 +210,7 @@ async function reload() {
     renderHomes();
     render();
     await poll();
-    loadTrends();
+    loadTrends().then(logPanels);
     schedulePoll();
   } catch (e) {
     toast('加载失败：' + e.message, true);
@@ -963,6 +963,13 @@ function toast(msg, err) {
 
 // 详情面板打开时定期刷新
 setInterval(() => { if (S.detail && !document.hidden) refreshDetail(); }, 30000);
+
+/* ---------------- 诊断日志 ---------------- */
+const logRemote = msg => { try { backend && backend.log && backend.log(msg); } catch (e) {} };
+window.addEventListener('error', e => logRemote(`JS 错误：${e.message} @${e.filename?.split('/').pop()}:${e.lineno}`));
+window.addEventListener('unhandledrejection', e => logRemote(`未处理的异常：${e.reason?.message || e.reason}`));
+// 加载完成后记一笔环境总览上显示了哪些面板
+const logPanels = () => logRemote('环境总览面板：' + [...document.querySelectorAll('.envp .envp-title')].map(e => e.innerText.replace(/\s+/g, ' ')).join(' / '));
 
 /* ---------------- 入口 ---------------- */
 if (window.pywebview?.api) { backend = window.pywebview.api; boot(); }

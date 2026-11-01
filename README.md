@@ -26,4 +26,6 @@ powershell -ExecutionPolicy Bypass -File app\install.ps1
 & "$env:LOCALAPPDATA\Programs\MijiaDesktop\.venv\Scripts\python.exe" tools\realserver.py app
 ```
 
-用户数据在 `%APPDATA%\MijiaDesktop`：`auth.json`（登录凭证，约 30 天自动续期）、`settings.json`、`specs/`（规格缓存）、`history.db`（本地历史，保留 14 天）。
+用户数据在 `%LOCALAPPDATA%\Programs\MijiaDesktop\data`：`auth.json`（登录凭证，约 30 天自动续期）、`settings.json`（含青萍 App Key/Secret）、`specs/`（规格缓存）、`history.db`（本地历史，米家读数保留 14 天，青萍历史长期保留）、`app.log`（运行日志）。
+
+> 不放 `%APPDATA%` 的原因：从打包应用（比如 Claude 桌面版）里启动的进程，写 AppData 会被 Windows 重定向到该应用的私有目录，双击快捷方式打开时就会读到另一份数据。
