@@ -12,6 +12,7 @@ from pathlib import Path
 import qrcode
 from mijiaAPI import mijiaAPI
 
+from qingping import BY_PIID, Qingping, QingpingError, norm_mac, spec_for
 from spec import TREND_KEYS, SpecStore, summarize
 
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "MijiaDesktop"
@@ -27,6 +28,9 @@ DEFAULT_SETTINGS = {
     "on_top": False,
     "theme": "auto",
     "show_all": False,    # 显示全部属性（含调试 / 不方便设置的）
+    "qingping_key": "",   # 青萍开放平台 App Key / App Secret
+    "qingping_secret": "",
+    "qingping_rooms": {}, # 青萍设备 did -> [home_id, room_id]（青萍设备没有米家房间，由用户指定）
 }
 
 
@@ -87,6 +91,8 @@ class Mijia:
         self.homes = []
         self._hkey = {}       # (did, "siid.piid") -> 云端历史用的 key（None 表示云端没有）
         self._hcache = {}     # (did, k, hours) -> (取数时间, rows)
+        self._qp_spec = {}    # 青萍设备 did -> 仿 MIoT 的 spec
+        self.qp = None
         self.login_state = {"state": "idle", "msg": ""}
         self.settings = dict(DEFAULT_SETTINGS)
         if SETTINGS_FILE.exists():
@@ -94,12 +100,26 @@ class Mijia:
                 self.settings.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
             except Exception:
                 pass
+        if self.settings.get("qingping_key") and self.settings.get("qingping_secret"):
+            self.qp = Qingping(self.settings["qingping_key"], self.settings["qingping_secret"])
 
     # ---------- 设置 ----------
     def save_settings(self, patch: dict):
         self.settings.update(patch or {})
         SETTINGS_FILE.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
         return self.settings
+
+    def set_qingping(self, key: str, secret: str) -> dict:
+        """保存青萍 App Key / Secret；先实际请求一次，确认能用再保存。传空则关闭青萍接入。"""
+        if not key or not secret:
+            self.qp = None
+            self.save_settings({"qingping_key": "", "qingping_secret": ""})
+            return {"count": 0}
+        q = Qingping(key, secret)
+        devs = q.devices(0)
+        self.qp = q
+        self.save_settings({"qingping_key": key.strip(), "qingping_secret": secret.strip()})
+        return {"count": len(devs)}
 
     # ---------- 登录 ----------
     def is_logged_in(self) -> bool:
@@ -180,6 +200,7 @@ class Mijia:
                 "has_spec": spec is not None,
                 "summary": summarize(spec),
             }
+        qp_info = self._load_qingping(out, devices, home_out)
         self.devices = out
         self._urn = {d["did"]: d.get("spec_type") for d in devices}
         return {
@@ -188,7 +209,59 @@ class Mijia:
             "scenes": [{"id": s.get("scene_id"), "name": s.get("name"), "home_id": str(s.get("home_id"))}
                        for s in scenes],
             "settings": self.settings,
+            "qingping": qp_info,
         }
+
+    def _load_qingping(self, out, mi_devices, homes) -> dict:
+        if not self.qp:
+            return {"enabled": False}
+        try:
+            qdevs = self.qp.devices(0)
+        except Exception as e:
+            return {"enabled": True, "error": str(e)}
+        mi_macs = {norm_mac(d.get("mac")): d.get("name") for d in mi_devices if d.get("mac")}
+        default_home = self.settings.get("home_id") or (homes[0]["id"] if homes else "")
+        skipped = []
+        for q in qdevs:
+            info = q.get("info", {})
+            mac = norm_mac(info.get("mac"))
+            if mac in mi_macs:  # 同一台设备同时在米家和青萍物联里，只保留米家那份
+                skipped.append({"name": info.get("name"), "mi_name": mi_macs[mac]})
+                continue
+            did = "qp:" + mac
+            spec = spec_for(q)
+            self._qp_spec[did] = spec
+            home_id, room_id = self.settings.get("qingping_rooms", {}).get(did, [default_home, ""])
+            out[did] = {
+                "did": did, "name": info.get("name") or spec["name"], "model": f"qingping.{info.get('product', {}).get('id', '')}",
+                "home_id": str(home_id), "room_id": str(room_id),
+                "online": not (info.get("status") or {}).get("offline", False),
+                "kind": spec["kind"], "has_spec": True, "source": "qingping", "mac": mac,
+                "report_interval": (info.get("setting") or {}).get("report_interval"),
+                "summary": summarize(spec),
+            }
+        return {"enabled": True, "count": len(qdevs) - len(skipped), "skipped": skipped}
+
+    def _qp_results(self) -> list:
+        """青萍设备的最新读数，整理成和米家 get_devices_prop 一样的结构。"""
+        if not self.qp or not any(d.startswith("qp:") for d in self.devices):
+            return []
+        try:
+            qdevs = self.qp.devices()
+        except Exception:
+            return []
+        res = []
+        for q in qdevs:
+            did = "qp:" + norm_mac(q.get("info", {}).get("mac"))
+            if did not in self.devices:
+                continue
+            data = q.get("data") or {}
+            t = (data.get("timestamp") or {}).get("value")
+            for piid, (field, *_rest) in BY_PIID.items():
+                v = (data.get(field) or {}).get("value")
+                if v is not None:
+                    res.append({"did": did, "siid": 0, "piid": piid, "value": v, "code": 0, "updateTime": t})
+        return res
 
     # ---------- 属性读取 ----------
     def _get_props(self, reqs: list) -> list:
@@ -240,12 +313,12 @@ class Mijia:
     def poll(self) -> dict:
         reqs = []
         for d in self.devices.values():
-            if not d["online"] or d["did"] in self.settings["hidden"]:
+            if not d["online"] or d["did"] in self.settings["hidden"] or d["did"].startswith("qp:"):
                 continue
             s = d["summary"]
             for p in s["sensors"] + s["status"] + ([s["power"]] if s["power"] else []):
                 reqs.append({"did": d["did"], "siid": p["siid"], "piid": p["piid"]})
-        results = self._get_props(reqs)
+        results = self._get_props(reqs) + self._qp_results()
         self._record(results)
         return {"values": self._fmt(results), "ts": int(time.time())}
 
@@ -273,7 +346,23 @@ class Mijia:
             end = min(int(it["time"]) for it in r) - 1
         return rows
 
+    def _qp_cloud(self, did, p, hours):
+        ck = (did, "*", hours)  # 青萍一次返回所有字段，按设备缓存
+        hit = self._hcache.get(ck)
+        if not hit or time.time() - hit[0] >= (600 if hours <= 24 else 1800):
+            now = int(time.time())
+            try:
+                rows = self.qp.history(did[3:], now - int(hours * 3600), now) if self.qp else []
+            except Exception:
+                rows = hit[1] if hit else []
+            hit = (time.time(), rows)
+            self._hcache[ck] = hit
+        field = BY_PIID[p["piid"]][0]
+        return [(int(r["timestamp"]), float(r[field])) for r in hit[1] if r.get(field) is not None]
+
     def _cloud(self, did, p, hours):
+        if did.startswith("qp:"):
+            return self._qp_cloud(did, p, hours)
         k = f"{p['siid']}.{p['piid']}"
         ck = (did, k, hours)
         hit = self._hcache.get(ck)
@@ -345,6 +434,9 @@ class Mijia:
         dev = self.devices.get(did)
         if not dev:
             return {"error": "设备不存在"}
+        if did.startswith("qp:"):
+            return {"device": dev, "spec": self._qp_spec.get(did),
+                    "values": self._fmt([r for r in self._qp_results() if r["did"] == did]).get(did, {})}
         spec = self.specs.get(self._urn.get(did))
         values = {}
         if spec and dev["online"]:
@@ -354,7 +446,7 @@ class Mijia:
         return {"device": dev, "spec": spec, "values": values}
 
     def history_of(self, did, siid, piid, hours=24):
-        spec = self.specs.get(self._urn.get(did))
+        spec = self._qp_spec.get(did) or self.specs.get(self._urn.get(did))
         p = next((p for s in (spec or {}).get("services", []) for p in s["props"]
                   if p["siid"] == int(siid) and p["piid"] == int(piid)), None)
         if not p:

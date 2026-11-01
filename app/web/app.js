@@ -201,7 +201,8 @@ async function reload() {
   btn.classList.add('spin');
   try {
     const d = await call('load');
-    Object.assign(S, { homes: d.homes, devices: d.devices, scenes: d.scenes, settings: d.settings });
+    Object.assign(S, { homes: d.homes, devices: d.devices, scenes: d.scenes, settings: d.settings, qingping: d.qingping || {} });
+    if (S.qingping.error) toast('青萍物联：' + S.qingping.error, true);
     applyTheme(S.settings.theme);
     $('#btn-top').classList.toggle('active', !!S.settings.on_top);
     if (!S.homes.find(x => x.id === S.home)) S.home = S.settings.home_id && S.homes.find(x => x.id === S.settings.home_id) ? S.settings.home_id : S.homes[0]?.id;
@@ -724,6 +725,7 @@ function renderDetail() {
   if (trendProps.length) body.append(chartBlock(d.did, trendProps));
 
   let shown = 0;
+  if (d.source === 'qingping') { body.append(qingpingBlock(d)); shown++; }
   for (const svc of spec.services) {
     const rows = [];
     for (const p of svc.props) {
@@ -746,6 +748,24 @@ function renderDetail() {
       closeDetail(); render(); toast('已隐藏，可在设置中恢复');
     } }, '在桌面端隐藏此设备')));
   body.scrollTop = scroll;
+}
+
+// 青萍设备不在米家的房间体系里，由用户自己选放在哪个房间
+function qingpingBlock(d) {
+  const home = S.homes.find(x => x.id === d.home_id) || S.homes.find(x => x.id === S.home);
+  const sel = h('select', { class: 'sel', onchange: async () => {
+    const rooms = { ...(S.settings.qingping_rooms || {}), [d.did]: [home.id, sel.value] };
+    S.settings = await call('save_settings', { qingping_rooms: rooms });
+    Object.assign(d, { room_id: sel.value, home_id: home.id });
+    $('#d-sub').textContent = roomName(d.room_id);
+    render();
+    toast(`已放到「${roomName(d.room_id)}」`);
+  } }, h('option', { value: '', selected: !d.room_id }, '未分配房间'),
+    (home?.rooms || []).map(r => h('option', { value: r.id, selected: r.id === d.room_id }, r.name)));
+  const rows = [h('div', { class: 'row' }, h('div', { class: 'lbl' }, h('div', {}, '所在房间'), h('div', { class: 'hint' }, '青萍设备不在米家里，需要手动指定')), sel)];
+  if (d.report_interval) rows.push(h('div', { class: 'row' }, h('div', { class: 'lbl' }, h('div', {}, '上报间隔')),
+    h('div', { class: 'ro' }, d.report_interval >= 60 ? `${Math.round(d.report_interval / 60)} 分钟` : `${d.report_interval} 秒`)));
+  return h('div', { class: 'svc' }, h('div', { class: 'svc-title' }, '青萍物联'), rows);
 }
 
 async function doSet(d, p, value) {
@@ -883,11 +903,31 @@ $('#btn-settings').onclick = () => {
   $('#set-poll').value = String(S.settings.poll_seconds || 60);
   $('#set-theme').value = S.settings.theme || 'auto';
   $('#set-all').classList.toggle('on', !!S.settings.show_all);
+  $('#qp-key').value = S.settings.qingping_key || '';
+  $('#qp-secret').value = '';
+  $('#qp-secret').placeholder = S.settings.qingping_secret ? 'App Secret（已保存，不改就留空）' : 'App Secret';
+  const qp = S.qingping || {};
+  $('#qp-hint').textContent = qp.error ? '连接失败：' + qp.error
+    : qp.enabled ? `已连接，显示 ${qp.count ?? 0} 台设备` + (qp.skipped?.length ? `（${qp.skipped.map(x => `「${x.name}」`).join('、')}和米家里的是同一台，已只保留米家那份）` : '')
+    : '在青萍开发者平台「个人中心 → 权限管理」申请 App Key 和 App Secret 后填在这里';
   const n = (S.settings.hidden || []).length;
   $('#hidden-hint').textContent = n ? `${n} 个设备被隐藏` : '没有隐藏的设备';
   $('#settings').classList.remove('hidden');
 };
 $('#set-close').onclick = () => $('#settings').classList.add('hidden');
+$('#qp-save').onclick = async () => {
+  const key = $('#qp-key').value.trim();
+  const secret = $('#qp-secret').value.trim() || (key ? S.settings.qingping_secret : '');
+  const btn = $('#qp-save');
+  btn.disabled = true; btn.textContent = '连接中…';
+  try {
+    const r = await call('set_qingping', key, secret || '');
+    toast(key ? `青萍物联已连接，账号下有 ${r.count} 台设备` : '已断开青萍物联');
+    $('#settings').classList.add('hidden');
+    await reload();
+  } catch (e) { toast('连接失败：' + e.message, true); }
+  finally { btn.disabled = false; btn.textContent = '连接'; }
+};
 $('#set-poll').onchange = async e => { S.settings = await call('save_settings', { poll_seconds: +e.target.value }); schedulePoll(); };
 $('#set-theme').onchange = async e => { S.settings = await call('save_settings', { theme: e.target.value }); applyTheme(S.settings.theme); };
 $('#set-all').onclick = async () => {

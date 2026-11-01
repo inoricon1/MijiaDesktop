@@ -410,3 +410,5 @@ body.widget .chipv .v { font-size: 16px; }
 :root[data-theme="dark"] .tag.lv-bad { background: #3d1c1e; color: #ff7b7f; }
 .co2-note { font-size: 12px; color: var(--text-2); }
 .chart-tip .muted { color: var(--text-3); }
+.qp-form { display: flex; gap: 8px; }
+.qp-form .txt { min-width: 0; }

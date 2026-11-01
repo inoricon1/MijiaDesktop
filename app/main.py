@@ -53,6 +53,10 @@ class Api:
         return self._m.poll()
 
     @safe
+    def set_qingping(self, key, secret):
+        return self._m.set_qingping(key, secret)
+
+    @safe
     def trends(self):
         return self._m.trends()
 
