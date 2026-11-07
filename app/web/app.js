@@ -997,6 +997,9 @@ const logPanels = () => logRemote('环境总览面板：' + [...document.querySe
 /* ---------------- 入口 ---------------- */
 if (window.AndroidBridge) {
   document.body.classList.add('android');
+  // 手机上叫「米家看板」，和桌面图标下的名字一致
+  document.title = '米家看板';
+  document.querySelectorAll('.login-card h1, .brand').forEach(el => el.lastChild.textContent = '米家看板');
   const pending = {};
   let seq = 0;
   window.__bridgeResolve = (id, res) => { const cb = pending[id]; delete pending[id]; cb && cb(JSON.parse(res)); };
