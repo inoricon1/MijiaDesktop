@@ -38,3 +38,4 @@ pycryptodome 用 `android/app/src/main/python/Crypto` 里的纯 Python RC4 代�
 - 构建：推送到 main 后由 GitHub Actions（`.github/workflows/android.yml`）自动构建，在 Actions 页面的 Artifacts 里下载 `MijiaDashboard-apk`
 - 登录：手机上没法扫自己的屏幕，点「保存二维码到相册」，再在米家 App「扫一扫」里从相册选这张图
 - 数据（登录、设置、青萍 Key、历史缓存）存在 App 私有目录，和电脑版互不影响
+- 签名：固定的正式签名存在仓库的 Actions Secret（`ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASSWORD`），每次构建签名一致，新版可直接覆盖安装。签名文件请另外备份，丢了以后只能卸载重装
