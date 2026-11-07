@@ -26,14 +26,24 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      # 缓存调试签名：每次构建签名一致，新版 APK 才能直接覆盖安装旧版
-      - uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
+      # 固定的正式签名（存在仓库的 Actions Secret 里），新版 APK 才能直接覆盖安装旧版
+      - name: 准备签名
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then echo "::error::没有配置 ANDROID_KEYSTORE_B64"; exit 1; fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
 
       - name: 构建 APK
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/release.p12
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: gradle -p android assembleRelease --stacktrace
+
+      - name: 检查签名
+        run: |
+          APKSIGNER=$(ls $ANDROID_HOME/build-tools/*/apksigner | sort -V | tail -1)
+          $APKSIGNER verify --print-certs android/app/build/outputs/apk/release/app-release.apk | grep -E "Signer #1 certificate (DN|SHA-256)"
 
       - name: 重命名
         run: cp android/app/build/outputs/apk/release/app-release.apk MijiaDashboard.apk

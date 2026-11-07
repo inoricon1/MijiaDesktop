@@ -27,11 +27,25 @@ android {
         }
     }
 
+    // 正式签名来自 GitHub Actions Secret（CI 解码到 KEYSTORE_FILE）；本地没有时退回调试签名
+    val keystoreFile = System.getenv("KEYSTORE_FILE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (keystoreFile != null) {
+            create("release") {
+                storeFile = keystoreFile
+                storeType = "pkcs12"
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = "mijia"
+                keyPassword = System.getenv("KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
-            // 用调试签名即可侧载安装；CI 里会缓存签名文件，保证每次构建签名一致、可以覆盖升级
-            signingConfig = signingConfigs.getByName("debug")
+            // 签名固定不变，新版才能直接覆盖安装旧版
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 
