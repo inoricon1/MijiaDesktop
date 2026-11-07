@@ -29,3 +29,12 @@ powershell -ExecutionPolicy Bypass -File app\install.ps1
 用户数据在 `%LOCALAPPDATA%\Programs\MijiaDesktop\data`：`auth.json`（登录凭证，约 30 天自动续期）、`settings.json`（含青萍 App Key/Secret）、`specs/`（规格缓存）、`history.db`（本地历史，米家读数保留 14 天，青萍历史长期保留）、`app.log`（运行日志）。
 
 > 不放 `%APPDATA%` 的原因：从打包应用（比如 Claude 桌面版）里启动的进程，写 AppData 会被 Windows 重定向到该应用的私有目录，双击快捷方式打开时就会读到另一份数据。
+
+## 安卓版（米家看板）
+
+`android/` 是安卓版：用 [Chaquopy](https://chaquo.com/chaquopy/) 把同一份 `app/*.py` 后端打进 APK，界面是同一份 `app/web` 跑在 WebView 里。
+pycryptodome 用 `android/app/src/main/python/Crypto` 里的纯 Python RC4 代替，所以 APK 里没有额外的原生库。
+
+- 构建：推送到 main 后由 GitHub Actions（`.github/workflows/android.yml`）自动构建，在 Actions 页面的 Artifacts 里下载 `MijiaDashboard-apk`
+- 登录：手机上没法扫自己的屏幕，点「保存二维码到相册」，再在米家 App「扫一扫」里从相册选这张图
+- 数据（登录、设置、青萍 Key、历史缓存）存在 App 私有目录，和电脑版互不影响
