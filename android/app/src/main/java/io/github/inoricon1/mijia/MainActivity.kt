@@ -25,7 +25,7 @@ import java.util.concurrent.Future
 
 /**
  * 整个界面是 assets 里的网页（和桌面版同一份 app/web），
- * 后端是 Chaquopy 内嵌的 Python（和桌面版同一份 app/*.py）。
+ * 后端是 Chaquopy 内嵌的 Python（和桌面版同一份 app 目录下的 .py 文件）。
  * 网页通过 AndroidBridge.call() 异步调用 Python，结果用 window.__bridgeResolve() 回传。
  */
 class MainActivity : Activity() {
