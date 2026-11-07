@@ -12,7 +12,9 @@ from pathlib import Path
 
 import qrcode
 import qrcode.image.svg
+import requests
 from mijiaAPI import mijiaAPI
+from mijiaAPI.errors import LoginError
 
 from qingping import BY_PIID, Qingping, QingpingError, norm_mac, spec_for
 from spec import TREND_KEYS, SpecStore, summarize
@@ -171,36 +173,73 @@ class Mijia:
             try:
                 self.api._refresh_token()
                 return True
+            except requests.RequestException:
+                # 只是网络不通（手机刚解锁、切网络时很常见），登录凭证本身没问题，不要让人重新扫码
+                return True
             except Exception:
                 return False
 
-    def start_login(self) -> dict:
-        with self.lock:
-            data = self.api._get_qr_login_data()
-        if data.get("refreshed"):
-            self.login_state = {"state": "ok", "msg": ""}
-            return {"refreshed": True}
+    # 二维码登录要等对方扫码确认。手机上扫码得切到米家 App，这期间本 App 可能被系统杀掉，
+    # 所以把「正在等待的二维码」存到文件里：重启后显示同一个码、继续等，而不是换一个新码
+    PENDING_FILE = DATA_DIR / "pending_login.json"
+    QR_TTL = 600  # 一个二维码最多等 10 分钟
+
+    def start_login(self, force: bool = False) -> dict:
+        pending = None
+        if not force and self.PENDING_FILE.exists():
+            try:
+                pending = json.loads(self.PENDING_FILE.read_text(encoding="utf-8"))
+                if time.time() - pending["created"] > self.QR_TTL:
+                    pending = None
+            except Exception:
+                pending = None
+        if pending:
+            data = pending["data"]
+        else:
+            with self.lock:
+                data = self.api._get_qr_login_data()
+            if data.get("refreshed"):
+                self.login_state = {"state": "ok", "msg": ""}
+                return {"refreshed": True}
+            pending = {"created": time.time(), "data": data}
+            self.PENDING_FILE.write_text(json.dumps(pending), encoding="utf-8")
         # 用 SVG 而不是 PNG：不依赖 Pillow，安卓版也能直接用
         img = qrcode.make(data["loginUrl"], box_size=8, border=2, image_factory=qrcode.image.svg.SvgPathFillImage)
         buf = io.BytesIO()
         img.save(buf)
         self.login_state = {"state": "waiting", "msg": "请用米家 App 扫码"}
+        self._login_gen = getattr(self, "_login_gen", 0) + 1
+        gen = self._login_gen
 
         def wait():
-            try:
-                self.api._complete_qr_login(data)
-                self.login_state = {"state": "ok", "msg": "登录成功"}
-            except Exception as e:
-                self.login_state = {"state": "error", "msg": str(e)}
+            # mijiaAPI 每次只等 120 秒；超时就接着等同一个码，直到 10 分钟
+            while True:
+                try:
+                    self.api._complete_qr_login(data)
+                    if gen == self._login_gen:
+                        self.login_state = {"state": "ok", "msg": "登录成功"}
+                    break
+                except Exception as e:
+                    if gen != self._login_gen:
+                        return  # 已经换了新二维码，这个线程作废
+                    expired = time.time() - pending["created"] > self.QR_TTL
+                    if not expired and isinstance(e, (LoginError, requests.RequestException)) \
+                            and ("超时" in str(e) or isinstance(e, requests.RequestException)):
+                        time.sleep(2)
+                        continue
+                    self.login_state = {"state": "error", "msg": "二维码已过期" if expired else str(e)}
+                    break
+            self.PENDING_FILE.unlink(missing_ok=True)
 
         threading.Thread(target=wait, daemon=True).start()
         return {"qr": "data:image/svg+xml;base64," + base64.b64encode(buf.getvalue()).decode(),
-                "url": data["loginUrl"]}
+                "url": data["loginUrl"], "resumed": time.time() - pending["created"] > 5}
 
     def logout(self):
         with self.lock:
             if AUTH_FILE.exists():
                 AUTH_FILE.unlink()
+            self.PENDING_FILE.unlink(missing_ok=True)
             self.api = _make_api()
         self.devices = {}
 

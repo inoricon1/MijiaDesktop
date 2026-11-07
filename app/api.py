@@ -47,8 +47,8 @@ class Api:
         return {"logged_in": self._m.is_logged_in()}
 
     @safe
-    def start_login(self):
-        return self._m.start_login()
+    def start_login(self, force=False):
+        return self._m.start_login(bool(force))
 
     @safe
     def login_state(self):

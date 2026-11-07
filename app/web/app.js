@@ -167,17 +167,19 @@ async function boot() {
 }
 
 let loginTimer = null;
-async function showLogin() {
+// force=true：「刷新二维码」按钮，换一个新码；否则如果上次的码还在等待中，继续用它（手机上切到米家 App 扫码时本 App 可能被系统杀掉）
+async function showLogin(force = false) {
   $('#app').classList.add('hidden');
   $('#login').classList.remove('hidden');
   $('#qr').innerHTML = '<span style="color:#999">正在获取二维码…</span>';
   $('#login-msg').textContent = '请用米家 App 扫码';
   clearInterval(loginTimer);
   try {
-    const r = await call('start_login');
+    const r = await call('start_login', force === true);
     if (r.refreshed) return enterApp();
     $('#qr').innerHTML = `<img src="${r.qr}" alt="二维码">`;
     S.loginQr = r.qr;
+    if (r.resumed) $('#login-msg').textContent = '还是刚才那个二维码，扫码确认后会自动登录';
     loginTimer = setInterval(async () => {
       const s = await call('login_state');
       if (s.state === 'ok') { clearInterval(loginTimer); enterApp(); }
@@ -188,7 +190,7 @@ async function showLogin() {
     $('#login-msg').textContent = e.message;
   }
 }
-$('#login-retry').onclick = showLogin;
+$('#login-retry').onclick = () => showLogin(true);
 // 手机上没法扫自己屏幕：把二维码转成 PNG 存到相册，再在米家 App 里从相册识别
 $('#login-save').onclick = () => {
   if (!S.loginQr) return;
