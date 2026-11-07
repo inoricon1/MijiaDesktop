@@ -177,6 +177,7 @@ async function showLogin() {
     const r = await call('start_login');
     if (r.refreshed) return enterApp();
     $('#qr').innerHTML = `<img src="${r.qr}" alt="二维码">`;
+    S.loginQr = r.qr;
     loginTimer = setInterval(async () => {
       const s = await call('login_state');
       if (s.state === 'ok') { clearInterval(loginTimer); enterApp(); }
@@ -188,6 +189,22 @@ async function showLogin() {
   }
 }
 $('#login-retry').onclick = showLogin;
+// 手机上没法扫自己屏幕：把二维码转成 PNG 存到相册，再在米家 App 里从相册识别
+$('#login-save').onclick = () => {
+  if (!S.loginQr) return;
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 720;
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, 720, 720);
+    g.drawImage(img, 40, 40, 640, 640);
+    const ok = window.AndroidBridge?.saveImage(c.toDataURL('image/png'), 'mijia-login.png');
+    toast(ok ? '已保存到相册，打开米家 App 扫一扫 → 相册选这张图' : '保存失败，请截屏后在米家 App 里从相册识别', !ok);
+  };
+  img.src = S.loginQr;
+};
+$('#login-mihome').onclick = () => { if (!window.AndroidBridge?.openMiHome()) toast('没有找到米家 App', true); };
 
 async function enterApp() {
   $('#login').classList.add('hidden');
@@ -528,7 +545,7 @@ function lineChart(series, { h: H = 150, hours = 24, compact = false, marks = []
       (compact ? '' : `，平均 ${fmtNum(s.p, avg)}${s.p.unit}`);
   }).join('　') + (hours > 24 && (t1 - t0) < hours * 3600 * 0.9 ? `　<span class="muted">（云端只有最近 ${Math.max(1, Math.round((t1 - t0) / 86400))} 天的数据）</span>` : '');
   tip.innerHTML = summary;
-  el.onmousemove = e => {
+  el.onpointermove = e => {
     const rc = el.getBoundingClientRect();
     const t = t0 + ((e.clientX - rc.left) / rc.width * W - L) / (W - L - R) * (t1 - t0);
     const parts = [];
@@ -545,7 +562,7 @@ function lineChart(series, { h: H = 150, hours = 24, compact = false, marks = []
     const dt = new Date(t * 1000);
     tip.innerHTML = `${dt.getMonth() + 1}/${dt.getDate()} ${dt.toTimeString().slice(0, 5)}　` + parts.join('　');
   };
-  el.onmouseleave = () => {
+  el.onpointerleave = el.onpointerup = () => {
     tip.innerHTML = summary;
     el.querySelectorAll('.dot,.cur').forEach(n => n.setAttribute('opacity', 0));
   };
@@ -688,6 +705,12 @@ async function openDetail(did) {
   $('#drawer').classList.add('open');
   await refreshDetail();
 }
+window.__onBack = () => {
+  if (S.detail) { closeDetail(); return true; }
+  if (!$('#settings').classList.contains('hidden')) { $('#settings').classList.add('hidden'); return true; }
+  if (S.view !== 'env') { S.view = 'env'; render(); return true; }
+  return false;
+};
 function closeDetail() {
   S.detail = null;
   $('#drawer').classList.remove('open');
@@ -972,7 +995,20 @@ window.addEventListener('unhandledrejection', e => logRemote(`未处理的异常
 const logPanels = () => logRemote('环境总览面板：' + [...document.querySelectorAll('.envp .envp-title')].map(e => e.innerText.replace(/\s+/g, ' ')).join(' / '));
 
 /* ---------------- 入口 ---------------- */
-if (window.pywebview?.api) { backend = window.pywebview.api; boot(); }
+if (window.AndroidBridge) {
+  document.body.classList.add('android');
+  const pending = {};
+  let seq = 0;
+  window.__bridgeResolve = (id, res) => { const cb = pending[id]; delete pending[id]; cb && cb(JSON.parse(res)); };
+  backend = new Proxy({}, {
+    get: (_, name) => (...args) => new Promise(resolve => {
+      const id = String(++seq);
+      pending[id] = resolve;
+      window.AndroidBridge.call(id, String(name), JSON.stringify(args));
+    }),
+  });
+  boot();
+} else if (window.pywebview?.api) { backend = window.pywebview.api; boot(); }
 else window.addEventListener('pywebviewready', () => { backend = window.pywebview.api; boot(); });
 // 浏览器里直接打开时使用演示数据（便于调界面）
 setTimeout(() => { if (!backend && window.MOCK) { backend = window.MOCK; boot(); } }, 600);
